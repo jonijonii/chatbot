@@ -1,11 +1,20 @@
 """API 비용 없이 실행하는 검색 안전장치 검사."""
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch, Mock
 from langchain_core.documents import Document
 import app
 
 
 class RetrievalTests(unittest.TestCase):
+    def test_text_file_encodings(self):
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / 'note.md'
+            for encoding in ('utf-8-sig', 'utf-16', 'cp949'):
+                path.write_text('한글 문서', encoding=encoding)
+                self.assertEqual(app.read_text_file(path), '한글 문서')
+
     def test_amount_and_country_are_read_from_source(self):
         texts = [
             '여비지급구분표\n구분: 제1호 | 해당공무원: 1급 공무원\n구분: 제2호 | 해당공무원: 제1호에 해당하지 않는 공무원',

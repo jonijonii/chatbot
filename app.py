@@ -85,6 +85,19 @@ def list_data_files() -> list[Path]:
     return files
 
 
+def read_text_file(path: Path) -> str:
+    """텍스트 문서의 BOM을 먼저 확인해 Windows와 Linux에서 똑같이 읽습니다."""
+    data = path.read_bytes()
+    # PowerShell이 만든 UTF-16 파일은 FF FE 또는 FE FF로 시작합니다.
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        # 오래된 한글 문서는 CP949일 수 있어 마지막으로 시도합니다.
+        return data.decode("cp949")
+
+
 def load_documents(files: list[Path]) -> list[Document]:
     documents = []
     for path in files:
@@ -99,10 +112,7 @@ def load_documents(files: list[Path]) -> list[Document]:
                           "\n".join(table_rows(t) for t in pdf.pages[i - 1].extract_tables()))
                          for i, text in pages if text]
         else:
-            try:
-                text = path.read_text(encoding="utf-8-sig")
-            except UnicodeDecodeError:
-                text = path.read_text(encoding="cp949")
+            text = read_text_file(path)
             pages = [(1, text)]
         if not any(text and text.strip() for _, text in pages):
             raise ValueError(f"텍스트를 읽을 수 없는 파일입니다. OCR이 필요할 수 있습니다: {source}")
