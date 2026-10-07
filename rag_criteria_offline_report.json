@@ -1,0 +1,37 @@
+[
+  {
+    "type": "정상·단일 근거",
+    "passed": true,
+    "evidence": "처리기준 PDF 43쪽의 근무지 외 여비 4개 항목"
+  },
+  {
+    "type": "조건형·복합 상황",
+    "passed": true,
+    "evidence": "처리기준 PDF 11쪽의 거주지 직접 출발 및 근무지 기준 상한"
+  },
+  {
+    "type": "금액·계산형",
+    "passed": true,
+    "evidence": "100문100답 PDF 31쪽의 Q&A 48 계산"
+  },
+  {
+    "type": "예외·경계 사례",
+    "passed": true,
+    "evidence": "100문100답 PDF 31쪽의 Q&A 50 예외"
+  },
+  {
+    "type": "정보 부족 질문",
+    "passed": true,
+    "evidence": "처리기준 PDF 84쪽에서 지급구분별 기준이 달라 추가 조건 필요"
+  },
+  {
+    "type": "문서 외·답변 불가",
+    "passed": true,
+    "evidence": "두 PDF에 민간기업 직원 출장비 기준 없음"
+  },
+  {
+    "type": "오답 유도·허위 전제",
+    "passed": true,
+    "evidence": "100문100답 PDF 25쪽의 Q&A 33"
+  }
+]
