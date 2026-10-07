@@ -543,7 +543,7 @@ def main() -> None:
     load_dotenv(ROOT / ".env")
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
-        st.warning(".env 파일의 OPENAI_API_KEY를 입력해 주세요.")
+        st.warning("OPENAI_API_KEY를 설정해 주세요. 로컬에서는 .env, Streamlit Cloud에서는 앱의 Secrets에 입력합니다.")
         st.stop()
     try:
         files = list_data_files()

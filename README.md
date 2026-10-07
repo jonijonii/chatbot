@@ -12,6 +12,23 @@ uv run streamlit run app.py
 
 `.env`에 실제 OpenAI API 키를 입력하세요.
 
+## Streamlit Community Cloud 배포
+
+1. [Streamlit Community Cloud](https://share.streamlit.io/)에 GitHub 계정으로 로그인합니다.
+2. **Create app**에서 저장소 `jonijonii/chatbot`, 브랜치 `main`, 진입 파일 `app.py`를 선택합니다.
+3. **Advanced settings**에서 Python 버전을 **3.11**로 고릅니다.
+4. **Secrets**에는 다음 형식으로 실제 키를 입력합니다. 값은 GitHub 파일에 넣지 않습니다.
+
+   ```toml
+   OPENAI_API_KEY = "실제 API 키"
+   ```
+
+5. **Deploy**를 누릅니다. `uv.lock`을 사용해 Python 패키지를 설치합니다.
+
+현재 대화 기록은 서버의 `.chat_history/messages.json` 한 파일에 저장됩니다. 공개 배포에서
+여러 사람이 접속하면 대화가 공유될 수 있고, 클라우드 서버 재시작 시 기록이 사라질 수
+있습니다. 개인별로 계속 보존하려면 사용자 인증과 외부 데이터베이스가 필요합니다.
+
 대화와 출처는 `.chat_history/messages.json`에 자동 저장됩니다. 새로고침, 서버 재시작,
 코드·문서 변경 후에도 복원되며 사이드바의 **대화 초기화** 버튼으로 저장 기록을 지웁니다.
 이 저장소는 현재 로컬 개인용 프로젝트에서 공유하는 하나의 대화 기록입니다.
