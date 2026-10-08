@@ -63,12 +63,75 @@ class RetrievalTests(unittest.TestCase):
         index = app.SearchIndex(None, None, [], {'1': doc}, [])
         responses = [app.SearchPlan(queries=[]), app.Draft(status='answered', answer='틀린 금액 999',
                      evidence_ids=['E1'], missing=[], followup_queries=[]),
+                     app.Audit(supported=False, reason='금액 불일치', followup_queries=[]),
+                     app.Draft(status='answered', answer='틀린 금액 999',
+                               evidence_ids=['E1'], missing=[], followup_queries=[]),
                      app.Audit(supported=False, reason='금액 불일치', followup_queries=[])]
         chains = [Mock(invoke=Mock(return_value=r)) for r in responses]
         with patch('app.model_chain', side_effect=chains), patch('app.retrieve', return_value=(['1'], [])):
             result = app.answer_question('질문', index, 'unused')
         self.assertEqual(result['status'], 'citation_failed')
         self.assertNotIn('999', result['answer'])
+
+    def test_invalid_evidence_id_is_repaired_once(self):
+        doc = Document(page_content='원문 금액 20', metadata={'source': 'a.pdf', 'page': 1})
+        blocks = {'E1': doc}
+        wrong = app.Draft(status='answered', answer='20', evidence_ids=['E999'], missing=[], followup_queries=[])
+        corrected = app.Draft(status='answered', answer='20', evidence_ids=['E1'], missing=[], followup_queries=[])
+        trace = {'drafts': [], 'audit': []}
+        with patch('app.model_chain', side_effect=[Mock(invoke=Mock(return_value=wrong)),
+                                                  Mock(invoke=Mock(return_value=corrected))]):
+            result = app.draft_with_valid_ids('금액?', blocks, 'unused', '', trace)
+        self.assertEqual(result.evidence_ids, ['E1'])
+        self.assertEqual(trace['audit'], ['invalid_evidence_id'])
+
+    def test_direct_policy_quotes_source_amount(self):
+        text = ('3)친지 집 등에 숙박하거나 2인 이상이 공동으로 숙박한 경우\n'
+                '가) 숙박을 필요로 하는 공무상 여행 시 친지 집 등에서 숙박하여 숙박비를 지출하지 않은 경우 '
+                '출장 후 정산 신청을 하는 경우 1야당 23,000원을 지급할 수 있다.')
+        doc = Document(page_content=text, metadata={'source': 'rules.pdf', 'page': 18})
+        result = app.resolve_direct_policy_answer('친척집 숙박비 얼마야?', {'E1': doc}, 'domestic')
+        self.assertEqual(result['status'], 'answered')
+        self.assertIn('23,000원', result['answer'])
+        self.assertEqual(result['ids'], ['E1'])
+
+    def test_domestic_limit_needs_pay_category(self):
+        text = ('[별표 2] 국내 여비 지급표\n'
+                '구분: 제1호 | 숙박비(1박당): 실비\n'
+                '구분: 제2호 | 숙박비(1박당): 실비 (상한액: 지역별)')
+        doc = Document(page_content=text, metadata={'source': 'rules.pdf', 'page': 84})
+        result = app.resolve_direct_policy_answer('통영 숙박비 상한액 얼마야?', {'E1': doc}, 'domestic')
+        self.assertEqual(result['status'], 'insufficient')
+        self.assertEqual(result['ids'], ['E1'])
+
+    def test_special_fixed_rate_is_not_domestic_limit_table(self):
+        special = Document(page_content=(
+            '[별표 2] 국내 여비 지급표를 참조하는 예외 정액여비\n'
+            '구분: 제1호 | 숙박비: 77,000원\n'
+            '구분: 제2호 | 숙박비: 55,000원'), metadata={'source': 'rules.pdf', 'page': 20})
+        standard = Document(page_content=(
+            '[별표 2] 국내 여비 지급표\n'
+            '구분: 제1호 | 숙박비(1박당): 실비\n'
+            '구분: 제2호 | 숙박비(1박당): 실비 (상한액: 지역별)'),
+            metadata={'source': 'rules.pdf', 'page': 84})
+        result = app.resolve_direct_policy_answer('통영 숙박비 상한액 얼마야?',
+                                                  {'E20': special, 'E84': standard}, 'domestic')
+        self.assertEqual(result['ids'], ['E84'])
+
+    def test_audit_revision_uses_only_verified_answer(self):
+        doc = Document(page_content='원문 금액 20', metadata={'source': 'a.pdf', 'page': 1})
+        index = app.SearchIndex(None, None, [], {'1': doc}, [])
+        bad = app.Draft(status='answered', answer='30', evidence_ids=['E1'], missing=[], followup_queries=[])
+        good = app.Draft(status='answered', answer='20', evidence_ids=['E1'], missing=[], followup_queries=[])
+        responses = [app.SearchPlan(queries=[]), bad,
+                     app.Audit(supported=False, reason='금액 불일치', followup_queries=[]), good,
+                     app.Audit(supported=True, reason='원문과 일치', followup_queries=[])]
+        chains = [Mock(invoke=Mock(return_value=r)) for r in responses]
+        with patch('app.model_chain', side_effect=chains), patch('app.retrieve', return_value=(['1'], [])):
+            result = app.answer_question('금액?', index, 'unused')
+        self.assertEqual(result['status'], 'answered')
+        self.assertEqual(result['answer'], '20')
+        self.assertEqual(result['citations'][0]['page'], 1)
 
 
 if __name__ == '__main__':

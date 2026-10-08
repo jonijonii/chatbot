@@ -242,7 +242,7 @@ def retrieve(index: SearchIndex, queries: list[str], previous: list[str]) -> tup
     return selected, [{"query": q, "hits": [index.pages[p].metadata for p in result]} for q, result in zip(queries, hits)]
 
 
-def required_queries(question: str, index: SearchIndex) -> list[str]:
+def required_queries(question: str, index: SearchIndex, scope: str = "other") -> list[str]:
     """답을 고정하지 않고 질문의 희귀 핵심어와 필요한 규정 유형을 검색합니다."""
     queries = []
     for word in re.findall(r"[가-힣]{2,}", question):
@@ -252,7 +252,12 @@ def required_queries(question: str, index: SearchIndex) -> list[str]:
     if re.search(r"\d+\s*급", question):
         queries.append("여비지급구분표")
     if "숙박" in question:
-        queries.extend(["국외 여비 지급표", "국내 여비 지급표"])
+        if scope == "overseas":
+            queries.append("국외 여비 지급표")
+        elif scope == "domestic":
+            queries.append("국내 여비 지급표")
+        else:
+            queries.extend(["국외 여비 지급표", "국내 여비 지급표"])
     if "교육" in question or "훈련" in question:
         queries.extend(["교육훈련여비", "공무원 인재개발 업무처리지침"])
     return list(dict.fromkeys(queries))[:6]
@@ -274,6 +279,8 @@ ANSWER_INSTRUCTION = """제공된 문서만 사용해 한국어로 답하세요.
 표의 행과 열, 통화, 1일/1박, 실비 상한액/정액을 엄격히 구별하세요. 2급과 제2호는 다릅니다.
 국내와 국외, 교육훈련과 일반 출장, 통상 규정과 특별한 예외를 혼동하지 마세요.
 적용 구분을 문서에서 확정할 수 없다면 조건을 질문하세요. 자료별 금액이 충돌하면 자료명과 차이를 설명하세요.
+질문에 직급, 출장 시간, 숙박 방식 등 금액을 정할 조건이 빠졌다면 하나의 금액을 단정하지 말고 확인된 조건별 기준과 추가로 필요한 조건을 밝히세요.
+같은 원문에 예외나 반례가 있으면 함께 읽고 적용 여부를 구별하세요. 원문이 말하지 않은 제한을 만들지 마세요.
 다른 지침을 참조만 하는 경우 금액을 추측하지 말고 확인된 내용과 필요한 지침을 설명하세요.
 각 사실의 원문 ID를 evidence_ids로 선택하세요. 가짜 ID나 인용문을 만들지 마세요.
 답변 가능하면 answered, 근거 부족이면 insufficient, 안전상 거절일 때만 refused를 사용하세요.
@@ -285,12 +292,87 @@ AUDIT_INSTRUCTION = """원문과 후보 답변을 독립적으로 대조하고 �
 금액 답변은 직급→지급 구분→지역 등급→금액표의 올바른 행과 열, 통화, 1박/1일, 상한액/정액, 예외 조건을 검증하세요.
 특히 2급과 제2호를 혼동하지 마세요. 교육파견에 일반 출장 기준을 적용하지 마세요.
 모르는 내용을 모른다고 설명하는 답변은 허용하세요. 근거 부족인데 단정하는 답변은 차단하세요.
+동의어와 단위만 다른 같은 금액 표기는 허용하되, 원문에 없는 지급 제한을 추가하지 마세요.
+질문 범위 밖의 모든 예외를 나열하도록 요구하지 마세요. 다만 후보가 언급한 예외는 원문과 일치해야 합니다.
 숫자나 적용 조건이 다르면 supported=false로 하고 reason에 구체적인 불일치와 추가 검색 필요 사항을 적으세요."""
 
 
 def validate_ids(draft: Draft, blocks: dict[str, Document]) -> bool:
     return all(eid in blocks for eid in draft.evidence_ids) and (
         draft.status != "answered" or bool(draft.evidence_ids))
+
+
+def resolve_direct_policy_answer(question: str, blocks: dict[str, Document], scope: str) -> dict | None:
+    """원문에 직접 적힌 지급 기준은 숫자를 생성하지 않고 해당 문장을 인용합니다."""
+    if scope == "overseas" or "국외" in question or "해외" in question:
+        return None
+    ordered = sorted(blocks.items(), key=lambda item: (item[1].metadata["source"], item[1].metadata["page"]))
+    compact_question = compact_text(question)
+
+    if "숙박" in question and any(term in question for term in ("친척", "친지", "친구")):
+        for eid, doc in ordered:
+            source = " ".join(doc.page_content.split("[표 셀 구조:")[0].split())
+            if "친지집등에숙박하거나" not in compact_text(source):
+                continue
+            clause = re.search(r"가\)\s*숙박을\s*필요로\s*하는.{0,700}?지급할\s*수\s*있다\s*\.", source)
+            if clause and re.search(r"\d[\d,]*\s*원을?", clause.group()):
+                return {"answer": "친척·친구 집 등에서 숙박한 경우의 원문 기준입니다. "
+                        "숙박비를 지출하지 않고 출장 후 정산을 신청하는 조건을 확인하세요.\n\n> " + clause.group(),
+                        "ids": [eid], "status": "answered", "checks": ["원문 지급 문장 직접 인용"]}
+
+    if "근무지내" in compact_question and "출장" in question and any(term in question for term in ("여비", "얼마", "금액")):
+        core_id, core = None, None
+        exception_id, exception = None, None
+        for eid, doc in ordered:
+            source = " ".join(doc.page_content.split("[표 셀 구조:")[0].split())
+            if "근무지내국내출장의경우별도의여비의구분없이" in compact_text(source):
+                match = re.search(r"가\.\s*근무지내\s*국내출장의\s*경우.{0,260}?지급한다\s*\.", source)
+                if match and re.search(r"\d시간", match.group()) and re.search(r"\d[\d,]*만원", match.group()):
+                    core_id, core = eid, match.group()
+            if "근무지내국내출장중왕복2km이내" in compact_text(source):
+                match = re.search(r"마\.\s*근무지내\s*국내출장\s*중\s*왕복.{0,150}?실비로\s*지급한다\s*\.", source)
+                if match:
+                    exception_id, exception = eid, match.group()
+        if core and exception:
+            return {"answer": "근무지 내 국내출장의 기본 여비 기준은 다음과 같습니다.\n\n> " + core
+                    + "\n\n왕복 2km 이내 근거리 출장에는 별도 규정이 적용됩니다.\n\n> " + exception
+                    + "\n\n출장 시간, 왕복 거리, 공용차량 이용 여부에 따라 실제 지급액을 확인해야 합니다.",
+                    "ids": [core_id, exception_id], "status": "answered",
+                    "checks": ["기본 지급 문장 직접 인용", "근거리 예외 문장 직접 인용"]}
+
+    if "숙박" in question and ("상한" in question or "얼마" in question):
+        if not re.search(r"(?<!\d)\d+\s*급|제\s*[12]\s*호", question):
+            for eid, doc in ordered:
+                text = compact_text(doc.page_content)
+                rows = [line for line in doc.page_content.splitlines()
+                        if line.startswith("구분: 제") and "숙박비(1박당):" in line]
+                if ("[별표2]" in text and "국내여비지급표" in text
+                        and any(line.startswith("구분: 제1호 |") for line in rows)
+                        and any(line.startswith("구분: 제2호 |") for line in rows)):
+                    return {"answer": "국내 숙박비는 원문의 국내 여비 지급표에서 제1호와 제2호 기준이 다릅니다. "
+                            "질문에 직급·직위가 없어 지급구분을 확정할 수 없습니다. "
+                            "직급 또는 직위, 출장지의 표상 지역 구분, 실제 숙박비를 알려주시면 적용 기준을 확인할 수 있습니다. "
+                            "숙박비는 표에서 1박당 실비 또는 실비 상한액으로 표시됩니다.",
+                            "ids": [eid], "status": "insufficient", "checks": ["지급구분별 숙박비 표 확인"]}
+    return None
+
+
+def draft_with_valid_ids(question: str, blocks: dict[str, Document], api_key: str,
+                         feedback: str, trace: dict) -> Draft | None:
+    """근거 번호가 잘못되면 허용된 번호와 원문을 다시 보여주고 한 번만 교정합니다."""
+    original = model_chain(Draft, ANSWER_INSTRUCTION, api_key).invoke({
+        "payload": f"질문: {question}\n이전 검증 결과: {feedback}\n원문:\n{context_text(blocks)}"})
+    trace["drafts"].append(original.model_dump())
+    if validate_ids(original, blocks):
+        return original
+    trace["audit"].append("invalid_evidence_id")
+    valid = ", ".join(blocks)
+    corrected = model_chain(Draft, ANSWER_INSTRUCTION, api_key).invoke({
+        "payload": f"질문: {question}\n앞선 답변: {original.model_dump_json()}\n"
+                   f"허용된 원문 ID: {valid}\n원문에 없는 사실은 지우고, 이 ID 중에서만 근거를 다시 선택하세요.\n"
+                   f"원문:\n{context_text(blocks)}"})
+    trace["drafts"].append(corrected.model_dump())
+    return corrected if validate_ids(corrected, blocks) else None
 
 
 def resolve_table_answer(question: str, blocks: dict[str, Document], scope: str = 'other') -> dict | None:
@@ -422,8 +504,9 @@ def answer_question(question: str, index: SearchIndex, api_key: str) -> dict:
             "한국어 문서 검색어를 최대 4개 작성. 원 질문을 직급 지급구분, 국가/지역, 금액표 등 필요한 근거로 분해. "
             "국가명 같은 고유명사는 단독 검색도 포함. 정답·금액·국가등급은 가정하지 말 것.", api_key
         ).invoke({"payload": question})
-        required = required_queries(question, index)
-        queries = list(dict.fromkeys(required + [question] + ([] if required else plan.queries[:2])))
+        required = required_queries(question, index, plan.scope)
+        # 원 질문과 모델의 동의어 검색도 유지합니다. 규칙 검색어가 있다고 버리지 않습니다.
+        queries = list(dict.fromkeys([question] + required + plan.queries[:4]))[:8]
         pids: list[str] = []
         feedback = ""
         for attempt in range(2):
@@ -431,6 +514,14 @@ def answer_question(question: str, index: SearchIndex, api_key: str) -> dict:
             trace["searches"].extend(searches)
             blocks = evidence_blocks(index, pids)
             trace["pages"] = [{"id": eid, **d.metadata, "text": d.page_content} for eid, d in blocks.items()]
+            resolved = resolve_direct_policy_answer(question, blocks, plan.scope)
+            if resolved:
+                trace["audit"].append({"method": "direct_source_quote", "supported": True,
+                                       "checks": resolved["checks"]})
+                return {"answer": resolved["answer"], "status": resolved["status"], "debug": trace,
+                        "citations": [{"id": e, "source": blocks[e].metadata["source"],
+                                       "page": blocks[e].metadata["page"], "quote": blocks[e].page_content}
+                                      for e in dict.fromkeys(resolved["ids"])]}
             resolved = resolve_table_answer(question, blocks, plan.scope)
             if resolved:
                 # 모델에게도 검산 근거를 전달해 호출하되 금액·조건은 검산된 원문으로 확정합니다.
@@ -441,11 +532,8 @@ def answer_question(question: str, index: SearchIndex, api_key: str) -> dict:
                 return {'answer': resolved['answer'], 'status': resolved['status'], 'debug': trace,
                         'citations': [{'id': e, 'source': blocks[e].metadata['source'], 'page': blocks[e].metadata['page'],
                                        'quote': blocks[e].page_content} for e in resolved['ids']]}
-            draft = model_chain(Draft, ANSWER_INSTRUCTION, api_key).invoke({
-                "payload": f"질문: {question}\n이전 검증 결과: {feedback}\n원문:\n{context_text(blocks)}"})
-            trace["drafts"].append(draft.model_dump())
-            if not validate_ids(draft, blocks):
-                trace["audit"].append("invalid_evidence_id")
+            draft = draft_with_valid_ids(question, blocks, api_key, feedback, trace)
+            if draft is None:
                 return {"answer": "출처 검증에 실패해 답변을 표시하지 않았습니다.", "citations": [], "status": "citation_failed", "debug": trace}
             selected = {eid: blocks[eid] for eid in dict.fromkeys(draft.evidence_ids)}
             # 아무 사실도 주장하지 않는 근거 부족 응답은 고정 안내로 처리합니다.
@@ -455,6 +543,21 @@ def answer_question(question: str, index: SearchIndex, api_key: str) -> dict:
             audit = model_chain(Audit, AUDIT_INSTRUCTION, api_key).invoke({"payload":
                 f"질문: {question}\n후보: {draft.model_dump_json()}\n선택된 원문:\n{context_text(selected)}"})
             trace["audit"].append(audit.model_dump())
+            if not audit.supported:
+                # 검색된 근거가 있는데 조건 설명만 틀린 경우 같은 원문으로 한 번 고칩니다.
+                revised = model_chain(Draft, ANSWER_INSTRUCTION, api_key).invoke({"payload":
+                    f"질문: {question}\n앞선 후보: {draft.model_dump_json()}\n검증 지적: {audit.reason}\n"
+                    "검증 지적도 틀릴 수 있습니다. 반드시 아래 원문을 기준으로 사실·조건을 다시 확인하고 "
+                    "정확한 답변과 근거 ID를 작성하세요.\n원문:\n" + context_text(selected)})
+                trace["drafts"].append(revised.model_dump())
+                if validate_ids(revised, selected):
+                    revised_selected = {eid: selected[eid] for eid in dict.fromkeys(revised.evidence_ids)}
+                    revised_audit = model_chain(Audit, AUDIT_INSTRUCTION, api_key).invoke({"payload":
+                        f"질문: {question}\n후보: {revised.model_dump_json()}\n선택된 원문:\n"
+                        + context_text(revised_selected)})
+                    trace["audit"].append(revised_audit.model_dump())
+                    if revised_audit.supported:
+                        draft, selected, audit = revised, revised_selected, revised_audit
             feedback = audit.reason
             extra = list(dict.fromkeys(draft.followup_queries + audit.followup_queries))[:3]
             if attempt == 0 and (draft.status == "insufficient" or not audit.supported) and extra:
